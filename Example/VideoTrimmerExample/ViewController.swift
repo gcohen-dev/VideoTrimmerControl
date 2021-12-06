@@ -78,28 +78,31 @@ class ViewController: UIViewController {
 
 	@objc private func didBeginScrubbing(_ sender: VideoTrimmer) {
 		updateLabels()
-
 		wasPlaying = (player.timeControlStatus != .paused)
 		player.pause()
 	}
 
 	@objc private func didEndScrubbing(_ sender: VideoTrimmer) {
 		updateLabels()
-
+//        let time = trimmer.selectedRange.start
+//        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
 		if wasPlaying == true {
 			player.play()
+            // TODO here the change
 		}
 	}
 
 	@objc private func progressDidChanged(_ sender: VideoTrimmer) {
 		updateLabels()
-
 		let time = CMTimeSubtract(trimmer.progress, trimmer.selectedRange.start)
 		player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero)
 	}
 
 	// MARK: - Private
 	private func updateLabels() {
+        if trimmer.selectedRange == .invalid {
+            return
+        }
 		leadingTrimLabel.text = trimmer.selectedRange.start.displayString
 		currentTimeLabel.text = trimmer.progress.displayString
 		trailingTrimLabel.text = trimmer.selectedRange.end.displayString

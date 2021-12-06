@@ -57,7 +57,7 @@ import AVFoundation
 			if let asset = asset {
 				let duration = asset.duration
 				range = CMTimeRange(start: .zero, duration: duration)
-				selectedRange = range
+				selectedRange = CMTimeRange(start: .zero, duration: min(duration, maximumDuration))
 				lastKnownViewSizeForThumbnailGeneration = .zero
 				setNeedsLayout()
 			}
@@ -73,8 +73,8 @@ import AVFoundation
 	}
 
 	// a clip cannot be trimmed shorter than this duration
-	var minimumDuration: CMTime = .zero
-
+    var minimumDuration: CMTime = CMTime(seconds: 2.0, preferredTimescale: 600)
+    var maximumDuration: CMTime = CMTime(seconds: 5.0, preferredTimescale: 600)
 	// the available range of the asset.
 	// Will be set to the full duration of the asset when assigning a new asset
 	var range: CMTimeRange = .invalid {
@@ -93,6 +93,7 @@ import AVFoundation
 
 	// defines what to do with the progress indicator
 	enum ProgressIndicatorMode {
+        case hiddenWhenBlockMoving // the progress indicator gets hidden when the user moving the video block
 		case hiddenOnlyWhenTrimming // the progress indicator gets hidden when the user starts trimming
 		case alwaysShown // the progress indicator is always shown, even when the user is trimming
 		case alwaysHidden // the progress indicator is never shown
@@ -103,19 +104,6 @@ import AVFoundation
 		}
 	}
 
-	func setProgressIndicatorMode(_ mode: ProgressIndicatorMode, animated: Bool) {
-		guard progressIndicatorMode != mode else {return}
-
-		if animated == true {
-			UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: {
-				self.progressIndicatorMode = mode
-				self.layoutIfNeeded()
-			})
-		} else {
-			progressIndicatorMode = mode
-		}
-	}
-
 	// defines where the progress indicator is shown.
 	var progress: CMTime = .zero {
 		didSet {
@@ -123,24 +111,14 @@ import AVFoundation
 		}
 	}
 
-	func setProgress(_ progress: CMTime, animated: Bool) {
-		guard CMTimeCompare(self.progress, progress) != 0 else {return}
-
-		self.progress = progress
-		if animated == true {
-			UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: {
-				self.layoutIfNeeded()
-			})
-		}
-	}
-
-
 	// defines if the user is trimming or not, and if so, which edge
 	enum TrimmingState {
 		case none		// user isn't trimming
 		case leading	// user is trimming the leading part of the asset
 		case trailing	// user is trimming the trailing part of the asset
 	}
+    
+    private(set) var isBlockUnderMovement = false
 
 	private(set) var trimmingState = TrimmingState.none {
 		didSet {
@@ -179,23 +157,14 @@ import AVFoundation
 		return isZoomedIn == true ? zoomedInRange : range
 	}
 
-	// the time that's currently selected by the user when trimming
-	var selectedTime: CMTime {
-		switch trimmingState {
-			case .none: return .zero
-			case .leading: return selectedRange.start
-			case .trailing: return selectedRange.end
-		}
-	}
-
 	// gesture recognizers used. Can be used, for instance, to
 	// require a tableview panGestureRecognizer to fail
 	private (set) var leadingGestureRecognizer: UILongPressGestureRecognizer!
 	private (set) var trailingGestureRecognizer: UILongPressGestureRecognizer!
 	private (set) var progressGestureRecognizer: UILongPressGestureRecognizer!
+    private (set) var tapGestureRecognizer: UITapGestureRecognizer!
 	private (set) var thumbnailInteractionGestureRecognizer: UILongPressGestureRecognizer!
 
-	// private stuff
 	private var grabberOffset = CGFloat(0)
 	private var zoomWaitTimer: Timer?
 
@@ -378,7 +347,7 @@ import AVFoundation
 		let ratio = visibleDurationInSeconds != 0 ? availableWidth / visibleDurationInSeconds : 0
 
 		let location = CGFloat(offset.seconds) * ratio
-		return SnapToDevicePixels(location) + inset
+		return snapToDevicePixels(location) + inset
 	}
 
 	private func startZoomWaitTimer() {
@@ -463,6 +432,18 @@ import AVFoundation
 			self.updateProgressIndicator()
 		})
 	}
+    
+    private func moveBlockStarted() {
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: {
+            self.updateProgressIndicator()
+        })
+    }
+    
+    private func moveBlockEnded() {
+        UIView.animate(withDuration: 0.25, delay: 0, options: [.beginFromCurrentState, .allowUserInteraction], animations: {
+            self.updateProgressIndicator()
+        })
+    }
 
 	private func updateProgressIndicator() {
 		switch progressIndicatorMode {
@@ -486,7 +467,11 @@ import AVFoundation
 						}
 					}
 				}
-		}
+        case .hiddenWhenBlockMoving:
+            progressIndicator.alpha = isBlockUnderMovement ? 0 : 1
+            progressIndicatorControl.isUserInteractionEnabled = !isBlockUnderMovement
+            setNeedsLayout()
+        }
 		progressIndicatorControl.alpha = progressIndicator.alpha
 	}
 
@@ -495,56 +480,63 @@ import AVFoundation
 	@objc private func thumbnailPanned(_ sender: UILongPressGestureRecognizer) {
 		progressGrabberPanned(sender)
 	}
-
-
+    
 	@objc private func progressGrabberPanned(_ sender: UILongPressGestureRecognizer) {
-
+        progressIndicatorMode = .hiddenWhenBlockMoving
+        
 		func handleChanged() {
 			let location = sender.location(in: self)
-			var time = timeForLocation(location.x + grabberOffset)
-
-			var didClamp = false
-			if CMTimeCompare(time, selectedRange.start) == -1 {
-				time = selectedRange.start
-				didClamp = true
-			}
-			if CMTimeCompare(time, selectedRange.end) == 1 {
-				time = selectedRange.end
-				didClamp = true
-			}
-
-			if didClamp == true && didClamp != didClampWhilePanning {
-				impactFeedbackGenerator?.impactOccurred()
-			}
-			didClampWhilePanning = didClamp
-
-			progress = time
+			let timeForPanning = timeForLocation(location.x + grabberOffset)
+            
+            var timeDiff = CMTimeSubtract(timeForPanning, progress)
+            timeDiff = CMTimeMultiplyByRatio(timeDiff, multiplier: 1, divisor: 2)
+            
+            var startTimeForSelectedRange = CMTimeAdd(selectedRange.start, timeDiff)
+            var endTimeToAddForSelectedRange = CMTimeAdd(selectedRange.end, timeDiff)
+            
+            if CMTimeCompare(startTimeForSelectedRange, range.start) == -1 {
+                endTimeToAddForSelectedRange = maximumDuration
+                startTimeForSelectedRange = range.start
+            }
+            
+            if CMTimeCompare(endTimeToAddForSelectedRange, range.end) == 1 {
+                endTimeToAddForSelectedRange = range.end
+                startTimeForSelectedRange = CMTimeSubtract(range.end, maximumDuration)
+            }
+            
+            selectedRange = CMTimeRange(start: startTimeForSelectedRange, end: endTimeToAddForSelectedRange)
+            
+			progress = startTimeForSelectedRange
 			setNeedsLayout()
 			sendActions(for: Self.progressChanged)
 		}
+        
 		switch sender.state {
 			case .began:
-
+                isBlockUnderMovement = false
 				UISelectionFeedbackGenerator().selectionChanged()
 				impactFeedbackGenerator = UIImpactFeedbackGenerator(style: .heavy)
 				impactFeedbackGenerator?.prepare()
 				didClampWhilePanning = false
-
 				isScrubbing = true
 				sendActions(for: Self.didBeginScrubbing)
 				handleChanged()
 
 			case .changed:
+                isBlockUnderMovement = true
+                moveBlockStarted()
 				handleChanged()
 
-			case .ended, .cancelled:
+			case .ended:
+                isBlockUnderMovement = false
+                moveBlockEnded()
 				impactFeedbackGenerator = nil
 
 				isScrubbing = false
+                progress = selectedRange.start
 				sendActions(for: Self.didEndScrubbing)
-
-			case .possible, .failed:
-				break
+                
+        case .possible, .failed, .cancelled: break
 
 			@unknown default:
 				break
@@ -553,11 +545,11 @@ import AVFoundation
 
 
 	@objc private func leadingGrabberPanned(_ sender: UILongPressGestureRecognizer) {
+        progressIndicatorMode = .hiddenOnlyWhenTrimming
 		switch sender.state {
 			case .began:
 				trimmingState = .leading
 				grabberOffset = thumbView.chevronWidth - sender.location(in: thumbView.leadingGrabber).x
-
 				startPanning()
 
 			case .changed:
@@ -566,6 +558,12 @@ import AVFoundation
 				let newDuration = CMTimeSubtract(selectedRange.end, time)
 
 				var didClamp = false
+                
+                if CMTimeCompare(newDuration, maximumDuration) == 1 {
+                    time = selectedRange.start
+                    didClamp = true
+                }
+
 				if CMTimeCompare(newDuration, minimumDuration) == -1 {
 					time = CMTimeSubtract(selectedRange.end, minimumDuration)
 					didClamp = true
@@ -582,12 +580,8 @@ import AVFoundation
 
 				if didClamp == true && didClamp != didClampWhilePanning {
 					impactFeedbackGenerator?.impactOccurred()
-				} else {
-//					if didClamp == false && CMTimeCompare(progress, time) == 0 && CMTimeCompare(progress, range.start) != 0 && CMTimeCompare(progress, range.end) != 0 {
-//						impactFeedbackGenerator?.impactOccurred(intensity: 0.5)
-//						didClamp = true
-//					}
 				}
+            
 				didClampWhilePanning = didClamp
 
 				selectedRange = CMTimeRange(start: time, end: selectedRange.end)
@@ -611,24 +605,28 @@ import AVFoundation
 	}
 
 	@objc private func trailingGrabberPanned(_ sender: UILongPressGestureRecognizer) {
+        progressIndicatorMode = .hiddenOnlyWhenTrimming
 		switch sender.state {
 			case .began:
 				trimmingState = .trailing
 				grabberOffset = sender.location(in: thumbView.trailingGrabber).x
-
 				startPanning()
-
 			case .changed:
 				let location = sender.location(in: self)
 				var time = timeForLocation(location.x - grabberOffset)
-
 				let newDuration = CMTimeSubtract(time, selectedRange.start)
-
 				var didClamp = false
+            
+                if CMTimeCompare(newDuration, maximumDuration) == 1 {
+                    time = CMTimeAdd(selectedRange.start, maximumDuration)
+                    didClamp = true
+                }
+                
 				if CMTimeCompare(newDuration, minimumDuration) == -1 {
 					time = CMTimeAdd(selectedRange.start, minimumDuration)
 					didClamp = true
 				}
+            
 				if CMTimeCompare(time, range.start) == -1 {
 					time = range.start
 					didClamp = true
@@ -640,12 +638,8 @@ import AVFoundation
 
 				if didClamp == true && didClamp != didClampWhilePanning {
 					impactFeedbackGenerator?.impactOccurred()
-				} else {
-//					if didClamp == false && CMTimeCompare(progress, time) == 0 && CMTimeCompare(progress, range.start) != 0 && CMTimeCompare(progress, range.end) != 0 {
-//						impactFeedbackGenerator?.impactOccurred(intensity: 0.5)
-//						didClamp = true
-//					}
 				}
+            
 				didClampWhilePanning = didClamp
 
 				selectedRange = CMTimeRange(start: selectedRange.start, end: time)
@@ -660,19 +654,15 @@ import AVFoundation
 			case .cancelled:
 				stopPanning()
 
-			case .possible, .failed:
-				break
+			case .possible, .failed: break
 
-			@unknown default:
-				break
+			@unknown default: break
 		}
 	}
 
 	// MARK: - UIView
 
-	override var intrinsicContentSize: CGSize {
-		return CGSize(width: UIView.noIntrinsicMetric, height: 50)
-	}
+	override var intrinsicContentSize: CGSize { CGSize(width: UIView.noIntrinsicMetric, height: 50) }
 
 	override func layoutSubviews() {
 		super.layoutSubviews()
@@ -752,39 +742,16 @@ import AVFoundation
 		super.init(coder: coder)
 		setup()
 	}
-}
-
-// MARK: -
-
-fileprivate func SnapToDevicePixels(_ value: CGFloat, scale: CGFloat? = nil) -> CGFloat {
-	let actualScale = scale ?? UIScreen.main.scale
-	return round(value * actualScale) / actualScale
-}
-
-fileprivate func SnapToDevicePixels(_ rect: CGRect, scale: CGFloat? = nil) -> CGRect {
-	return CGRect(x: SnapToDevicePixels(rect.origin.x, scale: scale),
-				  y: SnapToDevicePixels(rect.origin.y, scale: scale),
-				  width: SnapToDevicePixels(rect.maxX - rect.minX, scale: scale),
-				  height: SnapToDevicePixels(rect.maxY - rect.minY, scale: scale))
-}
-
-fileprivate extension CGRect {
-	func snappedToDevicePixels(scale: CGFloat? = nil) -> CGRect {
-		return SnapToDevicePixels(self, scale: scale)
-	}
+    
+    private func snapToDevicePixels(_ value: CGFloat, scale: CGFloat? = nil) -> CGFloat {
+        let actualScale = scale ?? UIScreen.main.scale
+        return round(value * actualScale) / actualScale
+    }
 }
 
 fileprivate extension CGSize {
-	func ceiled() -> CGSize {
-		return CGSize(width: ceil(width), height: ceil((height)))
-	}
-
-	func snappedToDevicePixels(scale: CGFloat? = nil) -> CGSize {
-		return CGSize(width: SnapToDevicePixels(width, scale: scale), height: SnapToDevicePixels(height, scale: scale))
-	}
-
+	
 	func applyingVideoTransform(_ transform: CGAffineTransform) -> CGSize {
-		return CGRect(origin: .zero, size: self).applying(transform).size
-	}
+        CGRect(origin: .zero, size: self).applying(transform).size
+    }
 }
-
