@@ -480,6 +480,7 @@ import AVFoundation
 	@objc private func thumbnailPanned(_ sender: UILongPressGestureRecognizer) {
 		progressGrabberPanned(sender)
 	}
+    var blockDiff = CMTime(value: 0, timescale: 600)
     
 	@objc private func progressGrabberPanned(_ sender: UILongPressGestureRecognizer) {
         progressIndicatorMode = .hiddenWhenBlockMoving
@@ -495,13 +496,14 @@ import AVFoundation
             var endTimeToAddForSelectedRange = CMTimeAdd(selectedRange.end, timeDiff)
             
             if CMTimeCompare(startTimeForSelectedRange, range.start) == -1 {
-                endTimeToAddForSelectedRange = maximumDuration
+                endTimeToAddForSelectedRange = CMTimeSubtract(selectedRange.end, selectedRange.start)
                 startTimeForSelectedRange = range.start
             }
             
             if CMTimeCompare(endTimeToAddForSelectedRange, range.end) == 1 {
                 endTimeToAddForSelectedRange = range.end
-                startTimeForSelectedRange = CMTimeSubtract(range.end, maximumDuration)
+                let keepRange = CMTimeSubtract(selectedRange.end, selectedRange.start)
+                startTimeForSelectedRange = CMTimeSubtract(range.end, keepRange)
             }
             
             selectedRange = CMTimeRange(start: startTimeForSelectedRange, end: endTimeToAddForSelectedRange)
